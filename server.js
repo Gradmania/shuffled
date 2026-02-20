@@ -8,8 +8,6 @@ app.use(cors());
 const crypto = require('crypto');
 const { Pool } = require('pg');
 
-const app = express();
-
 // ============ DATABASE CONNECTION ============
 
 // This connects to your PostgreSQL database on Railway.

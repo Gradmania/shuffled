@@ -32,7 +32,25 @@ async function setupDatabase() {
       created_at TIMESTAMP DEFAULT NOW()
     )
   `);
-  console.log('Database table ready.');
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS records (
+      id INTEGER PRIMARY KEY DEFAULT 1,
+      highest_count INTEGER DEFAULT 0,
+      shuffle_a_id INTEGER,
+      shuffle_b_id INTEGER,
+      today_highest_count INTEGER DEFAULT 0,
+      today_date DATE DEFAULT CURRENT_DATE
+    )
+  `);
+  // Make sure there's always exactly one row in records.
+  // INSERT ... ON CONFLICT DO NOTHING means:
+  // "Add this row, but if it already exists, don't touch it."
+  await pool.query(`
+    INSERT INTO records (id, highest_count)
+    VALUES (1, 0)
+    ON CONFLICT (id) DO NOTHING
+  `);
+  console.log('Database tables ready.');
 }
 
 // ============ THE DECK ============
@@ -135,36 +153,117 @@ app.get('/api/shuffle', async (req, res) => {
     // Get all previous shuffles from the database
     const existing = await pool.query('SELECT id, cards, created_at FROM shuffles');
 
+    // Find the closest match (before saving, so it doesn't compare against itself)
+    let matchResult = null;
+    if (existing.rows.length > 0) {
+      matchResult = findClosestMatch(shuffled, existing.rows);
+    }
+
+    // Save to database — RETURNING id gets back the ID that PostgreSQL assigned.
+    // Like dropping off a package and getting a tracking number back.
+    const saved = await pool.query(
+      'INSERT INTO shuffles (cards) VALUES ($1) RETURNING id',
+      [JSON.stringify(shuffled)]
+    );
+    const newShuffleId = saved.rows[0].id;
+
+    // If this match beats the global record, update it
+    // Also track today's highest match
+    if (matchResult && matchResult.matchCount > 0) {
+      const currentRecord = await pool.query(
+        'SELECT highest_count, today_highest_count, today_date FROM records WHERE id = 1'
+      );
+      const record = currentRecord.rows[0];
+
+      // Check if it's a new day — if so, reset today's counter.
+      // Like a scoreboard that wipes itself at midnight.
+      const today = new Date().toISOString().split('T')[0]; // e.g. "2026-02-27"
+      const isNewDay = record.today_date.toISOString().split('T')[0] !== today;
+      const todayHighest = isNewDay ? 0 : record.today_highest_count;
+
+      // Update global record if beaten
+      const beatGlobal = matchResult.matchCount > record.highest_count;
+      // Update today's record if beaten (or if it's a new day, anything beats 0)
+      const beatToday = matchResult.matchCount > todayHighest;
+
+      if (beatGlobal && beatToday) {
+        await pool.query(
+          `UPDATE records 
+           SET highest_count = $1, shuffle_a_id = $2, shuffle_b_id = $3,
+               today_highest_count = $1, today_date = $4
+           WHERE id = 1`,
+          [matchResult.matchCount, matchResult.matchedShuffle.id, newShuffleId, today]
+        );
+      } else if (beatGlobal) {
+        await pool.query(
+          'UPDATE records SET highest_count = $1, shuffle_a_id = $2, shuffle_b_id = $3 WHERE id = 1',
+          [matchResult.matchCount, matchResult.matchedShuffle.id, newShuffleId]
+        );
+      } else if (beatToday) {
+        await pool.query(
+          'UPDATE records SET today_highest_count = $1, today_date = $2 WHERE id = 1',
+          [matchResult.matchCount, today]
+        );
+      } else if (isNewDay) {
+        // New day but didn't beat anything — still need to reset the date
+        // and set today's count to this match (it's the first of the day)
+        await pool.query(
+          'UPDATE records SET today_highest_count = $1, today_date = $2 WHERE id = 1',
+          [matchResult.matchCount, today]
+        );
+      }
+    }
+
+    // Read the current global record (whether we just updated it or not)
+    const globalRecord = await pool.query(
+      'SELECT highest_count, shuffle_a_id, shuffle_b_id, today_highest_count, today_date FROM records WHERE id = 1'
+    );
+    const global = globalRecord.rows[0];
+
+    // Check if the stored today_date is actually today
+    const todayStr = new Date().toISOString().split('T')[0];
+    const storedDate = global.today_date.toISOString().split('T')[0];
+    const todayCount = storedDate === todayStr ? global.today_highest_count : 0;
+
+    // Build the response
     let result;
-    if (existing.rows.length === 0) {
+    if (!matchResult) {
       result = {
-        shuffle: { cards: shuffled, timestamp: new Date().toISOString() },
+        shuffle: { id: newShuffleId, cards: shuffled, timestamp: new Date().toISOString() },
         match: null,
         factoryCount: countFactoryPositions(shuffled),
+        globalHighest: {
+          count: 0,
+          shuffleA: null,
+          shuffleB: null,
+        },
+        todayHighest: {
+          count: 0,
+        },
         message: 'First shuffle ever! Nothing to compare against yet.',
       };
     } else {
-      const { matchCount, matchedShuffle, matchedPositions } = findClosestMatch(shuffled, existing.rows);
       result = {
-        shuffle: { cards: shuffled, timestamp: new Date().toISOString() },
+        shuffle: { id: newShuffleId, cards: shuffled, timestamp: new Date().toISOString() },
         match: {
-          positions: matchCount,
+          positions: matchResult.matchCount,
           outOf: 52,
-          matchedWithShuffle: matchedShuffle.id,
-          matchedAt: matchedShuffle.created_at,
-          matchedPositions: matchedPositions,
+          matchedWithShuffle: matchResult.matchedShuffle.id,
+          matchedAt: matchResult.matchedShuffle.created_at,
+          matchedPositions: matchResult.matchedPositions,
         },
         factoryCount: countFactoryPositions(shuffled),
+        globalHighest: {
+          count: global.highest_count,
+          shuffleA: global.shuffle_a_id,
+          shuffleB: global.shuffle_b_id,
+        },
+        todayHighest: {
+          count: todayCount,
+        },
       };
     }
 
-    // Save to database — this one survives restarts!
-    await pool.query(
-      'INSERT INTO shuffles (cards) VALUES ($1)',
-      [JSON.stringify(shuffled)]
-    );
-
-    // Add the new total count
     result.totalShuffles = existing.rows.length + 1;
 
     res.json(result);

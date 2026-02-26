@@ -67,28 +67,32 @@ function shuffle(deck) {
 
 function countMatches(deckA, deckB) {
   let matches = 0;
+  const matchedPositions = [];
   for (let i = 0; i < deckA.length; i++) {
     if (deckA[i] === deckB[i]) {
       matches++;
+      matchedPositions.push(i);
     }
   }
-  return matches;
+  return { matches, matchedPositions };
 }
 
 function findClosestMatch(newDeck, allShuffles) {
   let bestMatch = null;
   let bestCount = -1;
+  let bestPositions = [];
 
   for (const stored of allShuffles) {
     const theirCards = JSON.parse(stored.cards);
-    const count = countMatches(newDeck, theirCards);
-    if (count > bestCount) {
-      bestCount = count;
+    const { matches, matchedPositions } = countMatches(newDeck, theirCards);
+    if (matches > bestCount) {
+      bestCount = matches;
       bestMatch = stored;
+      bestPositions = matchedPositions;
     }
   }
 
-  return { matchCount: bestCount, matchedShuffle: bestMatch };
+  return { matchCount: bestCount, matchedShuffle: bestMatch, matchedPositions: bestPositions };
 }
 
 // ============ ROUTES ============
@@ -117,7 +121,7 @@ app.get('/api/shuffle', async (req, res) => {
         message: 'First shuffle ever! Nothing to compare against yet.',
       };
     } else {
-      const { matchCount, matchedShuffle } = findClosestMatch(shuffled, existing.rows);
+      const { matchCount, matchedShuffle, matchedPositions } = findClosestMatch(shuffled, existing.rows);
       result = {
         shuffle: { cards: shuffled, timestamp: new Date().toISOString() },
         match: {
@@ -125,6 +129,7 @@ app.get('/api/shuffle', async (req, res) => {
           outOf: 52,
           matchedWithShuffle: matchedShuffle.id,
           matchedAt: matchedShuffle.created_at,
+          matchedPositions: matchedPositions,
         },
       };
     }

@@ -50,6 +50,28 @@ function createDeck() {
   return deck;
 }
 
+// ============ FACTORY ORDER ============
+
+// A brand-new Bicycle deck comes in this exact order:
+// Spades A-K, Diamonds A-K, Clubs K-A, Hearts K-A
+// (Spades and Diamonds ascend, Clubs and Hearts descend)
+const FACTORY_ORDER = [
+  'A♠','2♠','3♠','4♠','5♠','6♠','7♠','8♠','9♠','10♠','J♠','Q♠','K♠',
+  'A♦','2♦','3♦','4♦','5♦','6♦','7♦','8♦','9♦','10♦','J♦','Q♦','K♦',
+  'K♣','Q♣','J♣','10♣','9♣','8♣','7♣','6♣','5♣','4♣','3♣','2♣','A♣',
+  'K♥','Q♥','J♥','10♥','9♥','8♥','7♥','6♥','5♥','4♥','3♥','2♥','A♥',
+];
+
+function countFactoryPositions(deck) {
+  let count = 0;
+  for (let i = 0; i < deck.length; i++) {
+    if (deck[i] === FACTORY_ORDER[i]) {
+      count++;
+    }
+  }
+  return count;
+}
+
 // ============ THE SHUFFLE ============
 
 function shuffle(deck) {
@@ -118,6 +140,7 @@ app.get('/api/shuffle', async (req, res) => {
       result = {
         shuffle: { cards: shuffled, timestamp: new Date().toISOString() },
         match: null,
+        factoryCount: countFactoryPositions(shuffled),
         message: 'First shuffle ever! Nothing to compare against yet.',
       };
     } else {
@@ -131,6 +154,7 @@ app.get('/api/shuffle', async (req, res) => {
           matchedAt: matchedShuffle.created_at,
           matchedPositions: matchedPositions,
         },
+        factoryCount: countFactoryPositions(shuffled),
       };
     }
 

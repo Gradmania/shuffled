@@ -5,7 +5,7 @@ const cookieParser = require('cookie-parser');
 
 const app = express();
 
-aapp.use(cors({ origin: true, credentials: true }));
+app.use(cors({ origin: true, credentials: true }));
 app.use(cookieParser());
 const crypto = require('crypto');
 const { Pool } = require('pg');

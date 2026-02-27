@@ -237,15 +237,52 @@ app.get('/api/shuffle', async (req, res) => {
           [req.user.last_shuffle_id]
         );
 
-        if (existingShuffle.rows.length > 0) {
+       if (existingShuffle.rows.length > 0) {
           const stored = existingShuffle.rows[0];
+          const storedCards = JSON.parse(stored.cards);
+
+          // Re-compute all the data for this shuffle so the frontend
+          // gets the same complete response as the first time.
+          const existing = await pool.query('SELECT id, cards, created_at FROM shuffles');
+          const otherShuffles = existing.rows.filter(r => r.id !== stored.id);
+          let matchResult = null;
+          if (otherShuffles.length > 0) {
+            matchResult = findClosestMatch(storedCards, otherShuffles);
+          }
+
+          const globalRecord = await pool.query(
+            'SELECT highest_count, shuffle_a_id, shuffle_b_id, today_highest_count, today_date FROM records WHERE id = 1'
+          );
+          const global = globalRecord.rows[0];
+          const todayCheck = new Date().toISOString().split('T')[0];
+          const storedDateCheck = global.today_date.toISOString().split('T')[0];
+          const todayCount = storedDateCheck === todayCheck ? global.today_highest_count : 0;
+
           return res.json({
             alreadyShuffledToday: true,
             shuffle: {
               id: stored.id,
-              cards: JSON.parse(stored.cards),
+              cards: storedCards,
               timestamp: stored.created_at,
             },
+            match: matchResult ? {
+              positions: matchResult.matchCount,
+              outOf: 52,
+              matchedWithShuffle: matchResult.matchedShuffle.id,
+              matchedAt: matchResult.matchedShuffle.created_at,
+              matchedPositions: matchResult.matchedPositions,
+            } : null,
+            factoryCount: countFactoryPositions(storedCards),
+            finds: detectFinds(storedCards),
+            globalHighest: {
+              count: global.highest_count,
+              shuffleA: global.shuffle_a_id,
+              shuffleB: global.shuffle_b_id,
+            },
+            todayHighest: {
+              count: todayCount,
+            },
+            totalShuffles: existing.rows.length,
             user: {
               yourHighest: req.user.highest_match,
               totalShuffles: req.user.total_shuffles,

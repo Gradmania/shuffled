@@ -290,6 +290,25 @@ app.get('/api/shuffle', async (req, res) => {
     const storedDate = global.today_date.toISOString().split('T')[0];
     const todayCount = storedDate === todayStr ? global.today_highest_count : 0;
 
+    // ============ UPDATE USER STATS ============
+    // req.user was attached by the coat check middleware above.
+    // Now we know their match count, so we can update their record.
+
+    const matchCount = matchResult ? matchResult.matchCount : 0;
+    const isNewPersonalBest = matchCount > req.user.highest_match;
+
+    // Update their row: add 1 to total_shuffles, set today's date,
+    // and if this match beat their personal best, update that too.
+    // GREATEST(highest_match, $1) means "whichever is bigger, keep that one."
+    await pool.query(
+      `UPDATE users 
+       SET total_shuffles = total_shuffles + 1,
+           last_shuffle_date = CURRENT_DATE,
+           highest_match = GREATEST(highest_match, $1)
+       WHERE id = $2`,
+      [matchCount, req.user.id]
+    );
+
     // Build the response
     let result;
     if (!matchResult) {
@@ -332,6 +351,14 @@ app.get('/api/shuffle', async (req, res) => {
     }
 
     result.totalShuffles = existing.rows.length + 1;
+
+    // Attach this user's personal stats.
+    // total_shuffles is +1 because we just incremented it above.
+    result.user = {
+      yourHighest: isNewPersonalBest ? matchCount : req.user.highest_match,
+      totalShuffles: req.user.total_shuffles + 1,
+      isNewPersonalBest: isNewPersonalBest,
+    };
 
     res.json(result);
   } catch (error) {

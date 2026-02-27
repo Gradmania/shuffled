@@ -1,10 +1,12 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 
 const app = express();
 
-app.use(cors());
+aapp.use(cors({ origin: true, credentials: true }));
+app.use(cookieParser());
 const crypto = require('crypto');
 const { Pool } = require('pg');
 
@@ -49,6 +51,15 @@ async function setupDatabase() {
     INSERT INTO records (id, highest_count)
     VALUES (1, 0)
     ON CONFLICT (id) DO NOTHING
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      created_at TIMESTAMP DEFAULT NOW(),
+      last_shuffle_date DATE,
+      highest_match INTEGER DEFAULT 0,
+      total_shuffles INTEGER DEFAULT 0
+    )
   `);
   console.log('Database tables ready.');
 }
@@ -134,6 +145,66 @@ function findClosestMatch(newDeck, allShuffles) {
 
   return { matchCount: bestCount, matchedShuffle: bestMatch, matchedPositions: bestPositions };
 }
+
+// ============ USER IDENTITY (COAT CHECK) ============
+
+// "Middleware" = code that runs in the middle, between a request
+// arriving and your route handling it. Like a receptionist who
+// checks your coat check ticket before letting you into the office.
+// This runs on EVERY request, automatically.
+
+app.use(async (req, res, next) => {
+  try {
+    // Step A: Check if they already have a ticket (cookie)
+    let userId = req.cookies.shuffled_user;
+
+    if (userId) {
+      // They showed a ticket — look them up in the database
+      const result = await pool.query('SELECT * FROM users WHERE id = $1', [userId]);
+      if (result.rows.length > 0) {
+        // Found them! Attach their info to the request
+        // so our routes can use it later via req.user
+        req.user = result.rows[0];
+      } else {
+        // They have a ticket, but we can't find them in our records.
+        // Maybe the database was reset. Treat them as new.
+        userId = null;
+      }
+    }
+
+    if (!userId) {
+      // Step B: New visitor — generate a random ticket
+      // crypto.randomBytes(12) creates 12 random bytes,
+      // .toString('hex') turns them into a 24-character string.
+      // So a full ID looks like: usr_3a9f1c7e2b04d8a56f1e9c72
+      userId = 'usr_' + crypto.randomBytes(12).toString('hex');
+
+      // Create their row in the database
+      await pool.query('INSERT INTO users (id) VALUES ($1)', [userId]);
+
+      // Send the cookie to their browser.
+      // This is literally handing them the coat check ticket.
+      res.cookie('shuffled_user', userId, {
+        maxAge: 365 * 24 * 60 * 60 * 1000, // Lasts 1 year (in milliseconds)
+        httpOnly: true,       // JavaScript on the page can't read it (security)
+        secure: true,         // Only sent over HTTPS (Railway uses HTTPS)
+        sameSite: 'none',     // Allow the cookie to be sent cross-origin
+      });
+
+      // Attach fresh user info so routes can use it immediately
+      req.user = { id: userId, highest_match: 0, total_shuffles: 0 };
+    }
+
+    // "next()" means "I'm done, pass this request to the next handler."
+    // Without this, the request would get stuck here forever.
+    next();
+  } catch (error) {
+    console.error('User identity error:', error);
+    // Still let the request through even if the cookie logic fails.
+    // Better to serve the page without user data than to show an error.
+    next();
+  }
+});
 
 // ============ ROUTES ============
 

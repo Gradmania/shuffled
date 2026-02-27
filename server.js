@@ -59,6 +59,7 @@ async function setupDatabase() {
       created_at TIMESTAMP DEFAULT NOW(),
       last_shuffle_date DATE,
       last_shuffle_id INTEGER,
+      current_streak INTEGER DEFAULT 0,
       highest_match INTEGER DEFAULT 0,
       total_shuffles INTEGER DEFAULT 0
     )
@@ -66,7 +67,11 @@ async function setupDatabase() {
   await pool.query(`
     ALTER TABLE users ADD COLUMN IF NOT EXISTS last_shuffle_id INTEGER
   `);
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS current_streak INTEGER DEFAULT 0
+  `);
   console.log('Database tables ready.');
+  
 }
 
 // ============ THE DECK ============
@@ -245,6 +250,7 @@ app.get('/api/shuffle', async (req, res) => {
               yourHighest: req.user.highest_match,
               totalShuffles: req.user.total_shuffles,
               isNewPersonalBest: false,
+              streak: req.user.current_streak,
             },
             message: 'You already shuffled today. Come back tomorrow!',
           });
@@ -339,14 +345,28 @@ app.get('/api/shuffle', async (req, res) => {
     // Update their row: add 1 to total_shuffles, set today's date,
     // and if this match beat their personal best, update that too.
     // GREATEST(highest_match, $1) means "whichever is bigger, keep that one."
-   await pool.query(
+   // Calculate streak: was their last shuffle yesterday?
+    let newStreak = 1; // Default: start a new streak
+    if (req.user.last_shuffle_date) {
+      const lastDate = new Date(req.user.last_shuffle_date);
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      // Compare just the date parts (ignore time)
+      if (lastDate.toISOString().split('T')[0] === yesterday.toISOString().split('T')[0]) {
+        // They shuffled yesterday — streak continues!
+        newStreak = req.user.current_streak + 1;
+      }
+    }
+
+    await pool.query(
       `UPDATE users 
        SET total_shuffles = total_shuffles + 1,
            last_shuffle_date = CURRENT_DATE,
            last_shuffle_id = $3,
+           current_streak = $4,
            highest_match = GREATEST(highest_match, $1)
        WHERE id = $2`,
-      [matchCount, req.user.id, newShuffleId]
+      [matchCount, req.user.id, newShuffleId, newStreak]
     );
 
     // Build the response
@@ -398,6 +418,7 @@ app.get('/api/shuffle', async (req, res) => {
       yourHighest: isNewPersonalBest ? matchCount : req.user.highest_match,
       totalShuffles: req.user.total_shuffles + 1,
       isNewPersonalBest: isNewPersonalBest,
+      streak: newStreak,
     };
 
     res.json(result);

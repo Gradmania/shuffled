@@ -287,10 +287,11 @@ app.get('/api/shuffle', async (req, res) => {
               count: todayCount,
             },
             totalShuffles: existing.rows.length,
-            user: {
+           user: {
               yourHighest: req.user.highest_match,
               totalShuffles: req.user.total_shuffles,
               isNewPersonalBest: false,
+              isTodaysLeader: matchResult && matchResult.matchCount >= todayCount && matchResult.matchCount > 0,
               streak: req.user.current_streak,
             },
             message: 'You already shuffled today. Come back tomorrow!',
@@ -459,6 +460,7 @@ app.get('/api/shuffle', async (req, res) => {
       yourHighest: isNewPersonalBest ? matchCount : req.user.highest_match,
       totalShuffles: req.user.total_shuffles + 1,
       isNewPersonalBest: isNewPersonalBest,
+      isTodaysLeader: matchCount >= todayCount && matchCount > 0,
       streak: newStreak,
     };
 

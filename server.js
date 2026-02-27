@@ -58,9 +58,13 @@ async function setupDatabase() {
       id TEXT PRIMARY KEY,
       created_at TIMESTAMP DEFAULT NOW(),
       last_shuffle_date DATE,
+      last_shuffle_id INTEGER,
       highest_match INTEGER DEFAULT 0,
       total_shuffles INTEGER DEFAULT 0
     )
+  `);
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS last_shuffle_id INTEGER
   `);
   console.log('Database tables ready.');
 }
@@ -212,6 +216,41 @@ app.get('/', (req, res) => {
 
 app.get('/api/shuffle', async (req, res) => {
   try {
+    // ============ ONE-PER-DAY CHECK ============
+    // Has this person already shuffled today?
+    // Compare their last_shuffle_date against today's date.
+    const today = new Date().toISOString().split('T')[0]; // e.g. "2026-02-27"
+
+    if (req.user && req.user.last_shuffle_date) {
+      const lastDate = req.user.last_shuffle_date.toISOString().split('T')[0];
+
+      if (lastDate === today) {
+        // They already shuffled today! Return their existing shuffle
+        // instead of generating a new one.
+        const existingShuffle = await pool.query(
+          'SELECT id, cards, created_at FROM shuffles WHERE id = $1',
+          [req.user.last_shuffle_id]
+        );
+
+        if (existingShuffle.rows.length > 0) {
+          const stored = existingShuffle.rows[0];
+          return res.json({
+            alreadyShuffledToday: true,
+            shuffle: {
+              id: stored.id,
+              cards: JSON.parse(stored.cards),
+              timestamp: stored.created_at,
+            },
+            user: {
+              yourHighest: req.user.highest_match,
+              totalShuffles: req.user.total_shuffles,
+              isNewPersonalBest: false,
+            },
+            message: 'You already shuffled today. Come back tomorrow!',
+          });
+        }
+      }
+    }
     const deck = createDeck();
     const shuffled = shuffle(deck);
 
@@ -300,13 +339,14 @@ app.get('/api/shuffle', async (req, res) => {
     // Update their row: add 1 to total_shuffles, set today's date,
     // and if this match beat their personal best, update that too.
     // GREATEST(highest_match, $1) means "whichever is bigger, keep that one."
-    await pool.query(
+   await pool.query(
       `UPDATE users 
        SET total_shuffles = total_shuffles + 1,
            last_shuffle_date = CURRENT_DATE,
+           last_shuffle_id = $3,
            highest_match = GREATEST(highest_match, $1)
        WHERE id = $2`,
-      [matchCount, req.user.id]
+      [matchCount, req.user.id, newShuffleId]
     );
 
     // Build the response

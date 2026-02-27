@@ -7,6 +7,10 @@ const app = express();
 
 app.use(cors({ origin: true, credentials: true }));
 app.use(cookieParser());
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
 const crypto = require('crypto');
 const { Pool } = require('pg');
 const { detectFinds, FACTORY_ORDER } = require('./finds-engine');

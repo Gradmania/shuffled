@@ -7,6 +7,7 @@ const app = express();
 app.use(cors());
 const crypto = require('crypto');
 const { Pool } = require('pg');
+const { detectFinds, FACTORY_ORDER } = require('./finds-engine');
 
 // ============ DATABASE CONNECTION ============
 
@@ -70,15 +71,8 @@ function createDeck() {
 
 // ============ FACTORY ORDER ============
 
-// A brand-new Bicycle deck comes in this exact order:
-// Spades A-K, Diamonds A-K, Clubs K-A, Hearts K-A
-// (Spades and Diamonds ascend, Clubs and Hearts descend)
-const FACTORY_ORDER = [
-  'A♠','2♠','3♠','4♠','5♠','6♠','7♠','8♠','9♠','10♠','J♠','Q♠','K♠',
-  'A♦','2♦','3♦','4♦','5♦','6♦','7♦','8♦','9♦','10♦','J♦','Q♦','K♦',
-  'K♣','Q♣','J♣','10♣','9♣','8♣','7♣','6♣','5♣','4♣','3♣','2♣','A♣',
-  'K♥','Q♥','J♥','10♥','9♥','8♥','7♥','6♥','5♥','4♥','3♥','2♥','A♥',
-];
+// Now imported from finds-engine.js — shared between
+// the finds detector (Factory Run) and the factory position counter here.
 
 function countFactoryPositions(deck) {
   let count = 0;
@@ -232,6 +226,7 @@ app.get('/api/shuffle', async (req, res) => {
         shuffle: { id: newShuffleId, cards: shuffled, timestamp: new Date().toISOString() },
         match: null,
         factoryCount: countFactoryPositions(shuffled),
+        finds: detectFinds(shuffled),
         globalHighest: {
           count: 0,
           shuffleA: null,
@@ -253,6 +248,7 @@ app.get('/api/shuffle', async (req, res) => {
           matchedPositions: matchResult.matchedPositions,
         },
         factoryCount: countFactoryPositions(shuffled),
+        finds: detectFinds(shuffled),
         globalHighest: {
           count: global.highest_count,
           shuffleA: global.shuffle_a_id,

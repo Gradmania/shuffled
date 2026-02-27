@@ -471,13 +471,37 @@ app.get('/api/shuffle', async (req, res) => {
 
 app.get('/api/stats', async (req, res) => {
   try {
+    // Total shuffles ever
     const count = await pool.query('SELECT COUNT(*) FROM shuffles');
     const total = parseInt(count.rows[0].count);
+
+    // Global and today's highest from the records table
+    const recordResult = await pool.query(
+      'SELECT highest_count, today_highest_count, today_date FROM records WHERE id = 1'
+    );
+    const record = recordResult.rows[0];
+
+    // Check if today_date is actually today
+    const today = new Date().toISOString().split('T')[0];
+    const storedDate = record.today_date.toISOString().split('T')[0];
+    const todayHighest = storedDate === today ? record.today_highest_count : 0;
+
+    // Count how many shuffles happened today
+    const todayCount = await pool.query(
+      "SELECT COUNT(*) FROM shuffles WHERE created_at::date = CURRENT_DATE"
+    );
+    const todayShuffles = parseInt(todayCount.rows[0].count);
+
     res.json({
       totalShuffles: total,
-      message: total === 0
-        ? 'No shuffles yet. Be the first!'
-        : `${total} shuffle${total === 1 ? '' : 's'} in the experiment.`,
+      globalHighest: record.highest_count,
+      todayHighest: todayHighest,
+      todayShuffles: todayShuffles,
+      user: req.user ? {
+        yourHighest: req.user.highest_match,
+        streak: req.user.current_streak,
+        totalShuffles: req.user.total_shuffles,
+      } : null,
     });
   } catch (error) {
     console.error('Stats error:', error);

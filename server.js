@@ -74,6 +74,35 @@ async function setupDatabase() {
   await pool.query(`
     ALTER TABLE users ADD COLUMN IF NOT EXISTS current_streak INTEGER DEFAULT 0
   `);
+   // --- New columns on shuffles table ---
+  await pool.query(`ALTER TABLE shuffles ADD COLUMN IF NOT EXISTS country TEXT`);
+  await pool.query(`ALTER TABLE shuffles ADD COLUMN IF NOT EXISTS city TEXT`);
+  await pool.query(`ALTER TABLE shuffles ADD COLUMN IF NOT EXISTS local_hour INTEGER`);
+
+  // --- New column on users table ---
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS first_shuffle_date DATE`);
+
+  // --- User Finds: "User X discovered find Y on shuffle Z" ---
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_finds (
+      user_id TEXT REFERENCES users(id),
+      find_id TEXT NOT NULL,
+      first_shuffle_id INTEGER REFERENCES shuffles(id),
+      discovered_at TIMESTAMP DEFAULT NOW(),
+      PRIMARY KEY (user_id, find_id)
+    )
+  `);
+
+  // --- User Achievements: "User X unlocked achievement Y on shuffle Z" ---
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_achievements (
+      user_id TEXT REFERENCES users(id),
+      achievement_id TEXT NOT NULL,
+      shuffle_id INTEGER REFERENCES shuffles(id),
+      unlocked_at TIMESTAMP DEFAULT NOW(),
+      PRIMARY KEY (user_id, achievement_id)
+    )
+  `);
   console.log('Database tables ready.');
   
 }
@@ -108,6 +137,24 @@ function countFactoryPositions(deck) {
   return count;
 }
 
+// ============ IP GEOLOCATION ============
+// Looks up a user's country and city from their IP address.
+// Uses ip-api.com — free, no API key needed.
+// Like checking the postmark on an envelope to see where it came from.
+
+async function lookupLocation(ip) {
+  try {
+    const response = await fetch(`http://ip-api.com/json/${ip}?fields=status,country,city`);
+    const data = await response.json();
+    if (data.status === 'success') {
+      return { country: data.country, city: data.city };
+    }
+    return { country: null, city: null };
+  } catch (error) {
+    console.error('Geolocation lookup failed:', error);
+    return { country: null, city: null };
+  }
+}
 // ============ THE SHUFFLE ============
 
 function shuffle(deck) {
@@ -299,6 +346,15 @@ app.get('/api/shuffle', async (req, res) => {
         }
       }
     }
+       // Look up where this person is shuffling from.
+    // x-forwarded-for is the real IP — Railway sits in front of your server
+    // (like a receptionist), so the original IP gets passed along in this header.
+    const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip;
+    const location = await lookupLocation(ip);
+    // Read the user's local hour (0-23), sent by the browser.
+    // parseInt turns the text "14" into the number 14.
+    // If the frontend didn't send it, we get null — no big deal.
+    const localHour = req.query.localHour != null ? parseInt(req.query.localHour) : null;
     const deck = createDeck();
     const shuffled = shuffle(deck);
 
@@ -314,8 +370,8 @@ app.get('/api/shuffle', async (req, res) => {
     // Save to database — RETURNING id gets back the ID that PostgreSQL assigned.
     // Like dropping off a package and getting a tracking number back.
     const saved = await pool.query(
-      'INSERT INTO shuffles (cards) VALUES ($1) RETURNING id',
-      [JSON.stringify(shuffled)]
+      'INSERT INTO shuffles (cards, country, city, local_hour) VALUES ($1, $2, $3, $4) RETURNING id',
+      [JSON.stringify(shuffled), location.country, location.city, localHour]
     );
     const newShuffleId = saved.rows[0].id;
 
@@ -400,13 +456,14 @@ app.get('/api/shuffle', async (req, res) => {
       }
     }
 
-    await pool.query(
+        await pool.query(
       `UPDATE users 
        SET total_shuffles = total_shuffles + 1,
            last_shuffle_date = CURRENT_DATE,
            last_shuffle_id = $3,
            current_streak = $4,
-           highest_match = GREATEST(highest_match, $1)
+           highest_match = GREATEST(highest_match, $1),
+           first_shuffle_date = COALESCE(first_shuffle_date, CURRENT_DATE)
        WHERE id = $2`,
       [matchCount, req.user.id, newShuffleId, newStreak]
     );

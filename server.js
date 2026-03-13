@@ -433,6 +433,40 @@ app.get('/api/shuffle', async (req, res) => {
     const storedDate = global.today_date.toISOString().split('T')[0];
     const todayCount = storedDate === todayStr ? global.today_highest_count : 0;
 
+    // ============ TRACK FINDS ============
+    // Which finds did this shuffle contain, and has this user seen them before?
+    const finds = detectFinds(shuffled);
+
+    // Get all find IDs this user has previously discovered.
+    // This is like checking a stamp collection — which stamps do they already have?
+    const existingFinds = await pool.query(
+      'SELECT find_id FROM user_finds WHERE user_id = $1',
+      [req.user.id]
+    );
+    const alreadyFound = new Set(existingFinds.rows.map(r => r.find_id));
+
+    // Mark each find as new or not, and save the new ones
+    const newFindIds = [];
+    for (const find of finds) {
+      if (alreadyFound.has(find.id)) {
+        find.isNew = false;
+      } else {
+        find.isNew = true;
+        newFindIds.push(find.id);
+      }
+    }
+
+    // Save any new discoveries to the database.
+    // Each INSERT uses ON CONFLICT DO NOTHING as a safety net —
+    // if somehow the same find gets inserted twice, it just ignores the duplicate.
+    for (const findId of newFindIds) {
+      await pool.query(
+        `INSERT INTO user_finds (user_id, find_id, first_shuffle_id)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (user_id, find_id) DO NOTHING`,
+        [req.user.id, findId, newShuffleId]
+      );
+    }
     // ============ UPDATE USER STATS ============
     // req.user was attached by the coat check middleware above.
     // Now we know their match count, so we can update their record.
@@ -475,7 +509,7 @@ app.get('/api/shuffle', async (req, res) => {
         shuffle: { id: newShuffleId, cards: shuffled, timestamp: new Date().toISOString() },
         match: null,
         factoryCount: countFactoryPositions(shuffled),
-        finds: detectFinds(shuffled),
+        finds: finds,
         globalHighest: {
           count: 0,
           shuffleA: null,
@@ -497,7 +531,7 @@ app.get('/api/shuffle', async (req, res) => {
           matchedPositions: matchResult.matchedPositions,
         },
         factoryCount: countFactoryPositions(shuffled),
-        finds: detectFinds(shuffled),
+        finds: finds,
         globalHighest: {
           count: global.highest_count,
           shuffleA: global.shuffle_a_id,

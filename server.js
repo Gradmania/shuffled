@@ -14,6 +14,24 @@ app.use((req, res, next) => {
 const crypto = require('crypto');
 const { Pool } = require('pg');
 const { detectFinds, FACTORY_ORDER } = require('./finds-engine');
+// ============ FIND RARITY LOOKUP ============
+// Maps each find ID to its rarity tier.
+// Used by the achievement engine to check rarity-based achievements
+// (like "first Rare find" or "finds from all 6 tiers").
+
+const FIND_RARITY = {
+  'pair': 'Common', 'suited-3': 'Common', 'blackjack': 'Common', 'run-3': 'Common',
+  'three-pairs': 'Uncommon', 'suited-blackjack': 'Uncommon', 'colour-6': 'Uncommon',
+  'suited-4': 'Uncommon', 'triple': 'Uncommon', 'mirror': 'Uncommon', 'run-4': 'Uncommon',
+  'alternating-7': 'Rare', 'two-pair': 'Rare', 'colour-8': 'Rare', 'suited-5': 'Rare',
+  'alternating-10': 'Rare', 'perfect-blackjack': 'Rare', 'straight': 'Rare', 'ace-high': 'Rare',
+  'colour-10': 'Very Rare', 'full-house': 'Very Rare', 'suited-6': 'Very Rare',
+  'two-triples': 'Very Rare', 'ascending-top-5': 'Very Rare', 'quad': 'Very Rare',
+  'run-6': 'Very Rare', 'suited-7': 'Very Rare', 'run-7': 'Very Rare',
+  'dead-mans-hand': 'Extraordinary', 'suited-8': 'Extraordinary', 'straight-flush': 'Extraordinary',
+  'two-quads': 'Extraordinary', 'solitaire-5': 'Extraordinary', 'factory-run': 'Extraordinary',
+  'royal-flush': 'Legendary',
+};
 
 // ============ DATABASE CONNECTION ============
 
@@ -78,9 +96,12 @@ async function setupDatabase() {
   await pool.query(`ALTER TABLE shuffles ADD COLUMN IF NOT EXISTS country TEXT`);
   await pool.query(`ALTER TABLE shuffles ADD COLUMN IF NOT EXISTS city TEXT`);
   await pool.query(`ALTER TABLE shuffles ADD COLUMN IF NOT EXISTS local_hour INTEGER`);
+  await pool.query(`ALTER TABLE shuffles ADD COLUMN IF NOT EXISTS user_id TEXT`);
+  await pool.query(`ALTER TABLE shuffles ADD COLUMN IF NOT EXISTS match_count INTEGER`);
 
   // --- New column on users table ---
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS first_shuffle_date DATE`);
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS last_match_count INTEGER`);
 
   // --- User Finds: "User X discovered find Y on shuffle Z" ---
   await pool.query(`
@@ -199,7 +220,247 @@ function findClosestMatch(newDeck, allShuffles) {
 
   return { matchCount: bestCount, matchedShuffle: bestMatch, matchedPositions: bestPositions };
 }
+// ============ ACHIEVEMENT ENGINE ============
+// After each shuffle, check which achievements the user has just earned.
+// Like a trophy inspector — runs through every possible achievement,
+// checks the conditions, and hands out any trophies that are newly earned.
+//
+// Wrapped in try/catch so a bug here can NEVER break someone's shuffle.
+// If something goes wrong, we just skip achievements and log the error.
+//
+// GROUP C achievements (Encore, Imprint, retroactive notifications)
+// are triggered by different events and aren't checked here.
 
+async function checkAchievements(userId, shuffleId, ctx) {
+  try {
+    // ---- GATHER DATA ----
+    // Run a few database queries to get the full picture before checking.
+
+    // Which achievements do they already have?
+    const existingAch = await pool.query(
+      'SELECT achievement_id FROM user_achievements WHERE user_id = $1',
+      [userId]
+    );
+    const alreadyUnlocked = new Set(existingAch.rows.map(r => r.achievement_id));
+
+    // How many unique finds do they have now? (Including any just added)
+    const findsCountResult = await pool.query(
+      'SELECT COUNT(*) FROM user_finds WHERE user_id = $1',
+      [userId]
+    );
+    const totalUniqueFinds = parseInt(findsCountResult.rows[0].count);
+
+    // Their recent shuffles (for pattern achievements like Hat Trick)
+    const recentResult = await pool.query(
+      'SELECT match_count, local_hour, created_at FROM shuffles WHERE user_id = $1 ORDER BY created_at DESC LIMIT 7',
+      [userId]
+    );
+    const recentShuffles = recentResult.rows;
+
+    // Every distinct match count they've ever had (for Full Spectrum)
+    const distinctResult = await pool.query(
+      'SELECT DISTINCT match_count FROM shuffles WHERE user_id = $1',
+      [userId]
+    );
+    const distinctMatchCounts = new Set(distinctResult.rows.map(r => r.match_count));
+
+    // ---- HELPER FUNCTION ----
+    // award() adds an achievement to the "newly unlocked" list,
+    // but only if they don't already have it. Like a bouncer
+    // checking the guest list — no duplicates allowed.
+    const newlyUnlocked = [];
+    function award(id) {
+      if (!alreadyUnlocked.has(id)) {
+        newlyUnlocked.push(id);
+      }
+    }
+
+    // ---- RARITY ANALYSIS ----
+    // Figure out which rarity tiers the user had BEFORE this shuffle,
+    // and which new ones they just discovered. Needed for
+    // first-discovery-by-rarity and connoisseur achievements.
+    const previousRarities = new Set();
+    for (const findId of ctx.alreadyFound) {
+      if (FIND_RARITY[findId]) previousRarities.add(FIND_RARITY[findId]);
+    }
+    const newRarities = new Set();
+    for (const findId of ctx.newFindIds) {
+      if (FIND_RARITY[findId]) newRarities.add(FIND_RARITY[findId]);
+    }
+    const allLifetimeRarities = new Set([...previousRarities, ...newRarities]);
+
+    // Rarity tiers found in THIS shuffle specifically
+    const thisShuffleRarities = new Set();
+    for (const find of ctx.finds) {
+      thisShuffleRarities.add(find.rarity);
+    }
+
+    // ========== STREAKS (6) ==========
+    if (ctx.totalShuffles >= 1) award('first-step');
+    if (ctx.streak >= 7) award('week-walker');
+    if (ctx.streak >= 14) award('fortnight');
+    if (ctx.streak >= 30) award('month-maven');
+    if (ctx.streak >= 90) award('quarter-quest');
+    if (ctx.streak >= 365) award('long-walk');
+
+    // ========== SHUFFLE TOTALS (4) ==========
+    if (ctx.totalShuffles >= 10) award('double-digits');
+    if (ctx.totalShuffles >= 50) award('half-century');
+    if (ctx.totalShuffles >= 100) award('century-club');
+    if (ctx.totalShuffles >= 365) award('full-orbit');
+
+    // ========== MATCH MILESTONES (4) ==========
+    if (ctx.matchCount >= 5) award('close-call');
+    if (ctx.matchCount >= 7) award('lucky-seven');
+    if (ctx.matchCount >= 8) award('near-miss');
+    if (ctx.matchCount >= 9) award('the-impossible');
+
+    // ========== MATCH EXPERIENCES (4) ==========
+    if (ctx.matchCount === 0) award('ghost-town');
+    // Twins: same match count as yesterday
+    if (ctx.lastMatchCount != null && ctx.matchCount === ctx.lastMatchCount) {
+      award('twins');
+    }
+    // The Other Half: GROUP C (needs retroactive notification system)
+    // Full Spectrum: seen every tier from Ghost (0) through Singularity (9)
+    const spectrumTiers = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+    if (spectrumTiers.every(n => distinctMatchCounts.has(n))) {
+      award('full-spectrum');
+    }
+
+    // ========== COLLECTION PROGRESS (3) ==========
+    if (totalUniqueFinds >= 5) award('curious');
+    if (totalUniqueFinds >= 15) award('explorer');
+    if (totalUniqueFinds >= 25) award('cataloguer');
+
+    // ========== FIRST DISCOVERY BY RARITY (4) ==========
+    // "First Rare find" means: this shuffle contains a Rare find,
+    // AND the user had never found anything Rare before.
+    if (newRarities.has('Rare') && !previousRarities.has('Rare')) award('something-rare');
+    if (newRarities.has('Very Rare') && !previousRarities.has('Very Rare')) award('against-odds');
+    if (newRarities.has('Extraordinary') && !previousRarities.has('Extraordinary')) award('one-in-a-million');
+    if (newRarities.has('Legendary') && !previousRarities.has('Legendary')) award('royal-witness');
+
+    // ========== FACTORY POSITION (5) ==========
+    if (ctx.factoryCount === 0) award('blank-slate');
+    if (ctx.factoryCount >= 2) award('deja-vu');
+    if (ctx.factoryCount >= 3) award('homing-instinct');
+    if (ctx.factoryCount >= 4) award('deck-remembers');
+    if (ctx.factoryCount >= 5) award('total-recall');
+
+    // ========== RETROACTIVE (4) — GROUP C ==========
+    // Rising Star, Sleeper Hit, Late Bloomer, The Climber
+    // These need the retroactive notification system — built later.
+
+    // ========== FUN & PERSONALITY (7) ==========
+    // Night Owl: shuffle between midnight and 4am local time
+    if (ctx.localHour != null && ctx.localHour >= 0 && ctx.localHour < 4) award('night-owl');
+    // Early Bird: shuffle between 4am and 7am local time
+    if (ctx.localHour != null && ctx.localHour >= 4 && ctx.localHour < 7) award('early-bird');
+    // Night and Day: earn both Night Owl and Early Bird
+    // Check both already-unlocked AND just-unlocked-this-shuffle
+    if ((alreadyUnlocked.has('night-owl') || newlyUnlocked.includes('night-owl')) &&
+        (alreadyUnlocked.has('early-bird') || newlyUnlocked.includes('early-bird'))) {
+      award('night-and-day');
+    }
+    // Weekender: shuffle both Saturday and Sunday the same weekend
+    // Uses UTC day — may be slightly off for distant timezones
+    if (recentShuffles.length >= 2) {
+      const latestDate = new Date(recentShuffles[0].created_at);
+      const latestDay = latestDate.getUTCDay(); // 0=Sun, 6=Sat
+      if (latestDay === 0 || latestDay === 6) {
+        const targetDay = latestDay === 0 ? 6 : 0; // Sun looks for Sat, Sat looks for Sun
+        const hasOtherDay = recentShuffles.slice(1).some(s => {
+          const d = new Date(s.created_at);
+          const dayDiff = Math.abs(latestDate - d) / (1000 * 60 * 60 * 24);
+          return d.getUTCDay() === targetDay && dayDiff <= 2;
+        });
+        if (hasOtherDay) award('weekender');
+      }
+    }
+    // Monday Motivation: shuffle on a Monday
+    if (new Date().getUTCDay() === 1) award('monday-motivation');
+    // Creature of Habit: shuffle within the same hour, 7 days running
+    if (recentShuffles.length >= 7 && ctx.localHour != null) {
+      const lastSeven = recentShuffles.slice(0, 7);
+      const allSameHour = lastSeven.every(s => s.local_hour === ctx.localHour);
+      if (allSameHour) {
+        // Also verify they're on 7 consecutive days
+        let consecutive = true;
+        for (let i = 0; i < 6; i++) {
+          const a = new Date(lastSeven[i].created_at);
+          const b = new Date(lastSeven[i + 1].created_at);
+          const dayDiff = Math.round((a - b) / (1000 * 60 * 60 * 24));
+          if (dayDiff !== 1) { consecutive = false; break; }
+        }
+        if (consecutive) award('creature-of-habit');
+      }
+    }
+    // Comeback Kid: shuffle again after 7+ days away
+    if (ctx.lastShuffleDate) {
+      const last = new Date(ctx.lastShuffleDate);
+      const now = new Date();
+      const daysSince = Math.floor((now - last) / (1000 * 60 * 60 * 24));
+      if (daysSince >= 7) award('comeback-kid');
+    }
+
+    // ========== PER-SHUFFLE MOMENTS (3) ==========
+    if (ctx.finds.length >= 8) award('jackpot');
+    if (ctx.matchCount === 0 && ctx.factoryCount === 0) award('phantom');
+    if (ctx.newFindIds.length >= 3) award('new-horizons');
+
+    // ========== VARIETY (3) ==========
+    // Variety Pack: finds from 4+ rarity tiers in one shuffle
+    if (thisShuffleRarities.size >= 4) award('variety-pack');
+    // Hat Trick: same match count three days in a row
+    if (recentShuffles.length >= 3) {
+      const lastThree = recentShuffles.slice(0, 3).map(s => s.match_count);
+      if (lastThree[0] === lastThree[1] && lastThree[1] === lastThree[2]) {
+        award('hat-trick');
+      }
+    }
+    // Connoisseur: finds from all 6 rarity tiers across lifetime
+    if (allLifetimeRarities.size >= 6) award('connoisseur');
+
+    // ========== LIFETIME (2) ==========
+    // Anniversary: shuffle on the one-year anniversary of your first shuffle
+    if (ctx.firstShuffleDate) {
+      const first = new Date(ctx.firstShuffleDate);
+      const now = new Date();
+      if (first.getUTCMonth() === now.getUTCMonth() &&
+          first.getUTCDate() === now.getUTCDate() &&
+          now.getUTCFullYear() > first.getUTCFullYear()) {
+        award('anniversary');
+      }
+    }
+    // Daily Crown: have the highest match of the day
+    if (ctx.matchCount > 0 && ctx.matchCount >= ctx.todayHighest) {
+      award('daily-crown');
+    }
+
+    // ========== KEEPSAKES (2) — GROUP C ==========
+    // Encore (watch replay) and Imprint (save shuffle)
+    // Triggered by frontend actions, not by shuffling.
+
+    // ========== THE FINAL CARD (1) ==========
+    if (totalUniqueFinds >= 35) award('completionist');
+
+    // ---- SAVE NEW ACHIEVEMENTS ----
+    for (const id of newlyUnlocked) {
+      await pool.query(
+        `INSERT INTO user_achievements (user_id, achievement_id, shuffle_id)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (user_id, achievement_id) DO NOTHING`,
+        [userId, id, shuffleId]
+      );
+    }
+
+    return newlyUnlocked;
+  } catch (error) {
+    console.error('Achievement check error:', error);
+    return []; // Never break the shuffle
+  }
+}
 // ============ USER IDENTITY (COAT CHECK) ============
 
 // "Middleware" = code that runs in the middle, between a request
@@ -355,6 +616,7 @@ app.get('/api/shuffle', async (req, res) => {
     // parseInt turns the text "14" into the number 14.
     // If the frontend didn't send it, we get null — no big deal.
     const localHour = req.query.localHour != null ? parseInt(req.query.localHour) : null;
+    const localDay = req.query.localDay != null ? parseInt(req.query.localDay) : null;
     const deck = createDeck();
     const shuffled = shuffle(deck);
 
@@ -370,8 +632,8 @@ app.get('/api/shuffle', async (req, res) => {
     // Save to database — RETURNING id gets back the ID that PostgreSQL assigned.
     // Like dropping off a package and getting a tracking number back.
     const saved = await pool.query(
-      'INSERT INTO shuffles (cards, country, city, local_hour) VALUES ($1, $2, $3, $4) RETURNING id',
-      [JSON.stringify(shuffled), location.country, location.city, localHour]
+      'INSERT INTO shuffles (cards, country, city, local_hour, user_id, match_count) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+      [JSON.stringify(shuffled), location.country, location.city, localHour, req.user.id, matchResult ? matchResult.matchCount : 0]
     );
     const newShuffleId = saved.rows[0].id;
 
@@ -497,10 +759,26 @@ app.get('/api/shuffle', async (req, res) => {
            last_shuffle_id = $3,
            current_streak = $4,
            highest_match = GREATEST(highest_match, $1),
-           first_shuffle_date = COALESCE(first_shuffle_date, CURRENT_DATE)
+           first_shuffle_date = COALESCE(first_shuffle_date, CURRENT_DATE),
+           last_match_count = $5
        WHERE id = $2`,
-      [matchCount, req.user.id, newShuffleId, newStreak]
+      [matchCount, req.user.id, newShuffleId, newStreak, matchCount]
     );
+    // ============ CHECK ACHIEVEMENTS ============
+    const newAchievements = await checkAchievements(req.user.id, newShuffleId, {
+      matchCount,
+      streak: newStreak,
+      totalShuffles: req.user.total_shuffles + 1,
+      finds,
+      newFindIds,
+      alreadyFound,
+      factoryCount: countFactoryPositions(shuffled),
+      localHour,
+      lastMatchCount: req.user.last_match_count,
+      lastShuffleDate: req.user.last_shuffle_date,
+      firstShuffleDate: req.user.first_shuffle_date || new Date(),
+      todayHighest: todayCount,
+    });
 
     // Build the response
     let result;
@@ -544,6 +822,7 @@ app.get('/api/shuffle', async (req, res) => {
     }
 
     result.totalShuffles = existing.rows.length + 1;
+    result.newAchievements = newAchievements;
 
     // Attach this user's personal stats.
     // total_shuffles is +1 because we just incremented it above.
@@ -553,6 +832,7 @@ app.get('/api/shuffle', async (req, res) => {
       isNewPersonalBest: isNewPersonalBest,
       isTodaysLeader: matchCount >= todayCount && matchCount > 0,
       streak: newStreak,
+      totalFinds: alreadyFound.size + newFindIds.length,
     };
 
     res.json(result);

@@ -870,11 +870,23 @@ app.get('/api/stats', async (req, res) => {
       globalHighest: record.highest_count,
       todayHighest: todayHighest,
       todayShuffles: todayShuffles,
-      user: req.user ? {
+      user: req.user ? await (async () => {
+      const findsResult = await pool.query(
+        'SELECT find_id FROM user_finds WHERE user_id = $1',
+        [req.user.id]
+      );
+      const achievementsResult = await pool.query(
+        'SELECT achievement_id FROM user_achievements WHERE user_id = $1',
+        [req.user.id]
+      );
+      return {
         yourHighest: req.user.highest_match,
         streak: req.user.current_streak,
         totalShuffles: req.user.total_shuffles,
-      } : null,
+        discoveredFinds: findsResult.rows.map(r => r.find_id),
+        unlockedAchievements: achievementsResult.rows.map(r => r.achievement_id),
+      };
+    })() : null,
     });
   } catch (error) {
     console.error('Stats error:', error);

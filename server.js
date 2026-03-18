@@ -931,6 +931,44 @@ app.post('/api/achievement', async (req, res) => {
   }
 });
 
+// ============ LIVE TICKER ============
+// Returns recent shuffles for the live ticker display.
+// Like a "recent activity" feed — shows the last few shuffles
+// with their city and match count, plus a count of how many
+// happened in the last 60 seconds.
+
+app.get('/api/ticker', async (req, res) => {
+  try {
+    // Recent shuffles (last 5 minutes, max 10)
+    const recent = await pool.query(
+      `SELECT city, country, match_count, created_at
+       FROM shuffles
+       WHERE created_at > NOW() - INTERVAL '5 minutes'
+       ORDER BY created_at DESC
+       LIMIT 10`
+    );
+
+    // Count of shuffles in the last 60 seconds
+    const lastMinute = await pool.query(
+      `SELECT COUNT(*) FROM shuffles
+       WHERE created_at > NOW() - INTERVAL '60 seconds'`
+    );
+
+    res.json({
+      recentShuffles: recent.rows.map(row => ({
+        city: row.city || null,
+        country: row.country || null,
+        matchCount: row.match_count,
+        timestamp: row.created_at,
+      })),
+      lastMinuteCount: parseInt(lastMinute.rows[0].count),
+    });
+  } catch (error) {
+    console.error('Ticker error:', error);
+    res.json({ recentShuffles: [], lastMinuteCount: 0 });
+  }
+});
+
 // ============ START SERVER ============
 
 const PORT = process.env.PORT || 3000;

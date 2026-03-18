@@ -875,10 +875,11 @@ app.get('/api/shuffle', async (req, res) => {
     });
 
     // Build the response
+    const shuffleHash = crypto.createHash('sha256').update(JSON.stringify(shuffled)).digest('hex');
     let result;
     if (!matchResult) {
       result = {
-        shuffle: { id: newShuffleId, cards: shuffled, timestamp: new Date().toISOString() },
+        shuffle: { id: newShuffleId, cards: shuffled, timestamp: new Date().toISOString(), hash: shuffleHash },
         match: null,
         factoryCount: countFactoryPositions(shuffled),
         finds: finds,
@@ -894,7 +895,7 @@ app.get('/api/shuffle', async (req, res) => {
       };
     } else {
       result = {
-        shuffle: { id: newShuffleId, cards: shuffled, timestamp: new Date().toISOString() },
+        shuffle: { id: newShuffleId, cards: shuffled, timestamp: new Date().toISOString(), hash: shuffleHash },
         match: {
           positions: matchResult.matchCount,
           outOf: 52,

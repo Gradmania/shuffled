@@ -896,6 +896,41 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
+// ============ FRONTEND-TRIGGERED ACHIEVEMENTS ============
+// Some achievements are earned by user actions in the browser
+// (not by shuffle data). The frontend calls this endpoint
+// to award them. Only specific IDs are allowed — we don't
+// want the frontend to be able to award arbitrary achievements.
+
+const FRONTEND_ACHIEVEMENTS = new Set(['encore', 'imprint']);
+
+app.post('/api/achievement', async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: 'No user identity found.' });
+    }
+
+    const { achievementId } = req.body;
+
+    if (!achievementId || !FRONTEND_ACHIEVEMENTS.has(achievementId)) {
+      return res.status(400).json({ error: 'Invalid achievement ID.' });
+    }
+
+    // Award it (ON CONFLICT DO NOTHING means it's safe to call twice)
+    await pool.query(
+      `INSERT INTO user_achievements (user_id, achievement_id, shuffle_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT DO NOTHING`,
+      [req.user.id, achievementId, null]
+    );
+
+    res.json({ success: true, achievementId });
+  } catch (error) {
+    console.error('Achievement award error:', error);
+    res.status(500).json({ error: 'Could not award achievement.' });
+  }
+});
+
 // ============ START SERVER ============
 
 const PORT = process.env.PORT || 3000;

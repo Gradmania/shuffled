@@ -555,7 +555,7 @@ app.get('/api/shuffle', async (req, res) => {
 
           // Re-compute all the data for this shuffle so the frontend
           // gets the same complete response as the first time.
-          const existing = await pool.query('SELECT id, cards, created_at FROM shuffles');
+          const existing = await pool.query('SELECT id, cards, created_at, country, city FROM shuffles');
           const otherShuffles = existing.rows.filter(r => r.id !== stored.id);
           let matchResult = null;
           if (otherShuffles.length > 0) {
@@ -807,6 +807,8 @@ app.get('/api/shuffle', async (req, res) => {
           matchedWithShuffle: matchResult.matchedShuffle.id,
           matchedAt: matchResult.matchedShuffle.created_at,
           matchedPositions: matchResult.matchedPositions,
+          matchedCountry: matchResult.matchedShuffle.country || null,
+          matchedCity: matchResult.matchedShuffle.city || null,
         },
         factoryCount: countFactoryPositions(shuffled),
         finds: finds,

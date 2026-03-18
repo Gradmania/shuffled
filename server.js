@@ -98,6 +98,8 @@ async function setupDatabase() {
   await pool.query(`ALTER TABLE shuffles ADD COLUMN IF NOT EXISTS local_hour INTEGER`);
   await pool.query(`ALTER TABLE shuffles ADD COLUMN IF NOT EXISTS user_id TEXT`);
   await pool.query(`ALTER TABLE shuffles ADD COLUMN IF NOT EXISTS match_count INTEGER`);
+  await pool.query(`ALTER TABLE shuffles ADD COLUMN IF NOT EXISTS best_received_match INTEGER DEFAULT 0`);
+  await pool.query(`ALTER TABLE shuffles ADD COLUMN IF NOT EXISTS received_improvement_count INTEGER DEFAULT 0`);
 
   // --- New column on users table ---
   await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS first_shuffle_date DATE`);
@@ -636,6 +638,98 @@ app.get('/api/shuffle', async (req, res) => {
       [JSON.stringify(shuffled), location.country, location.city, localHour, req.user.id, matchResult ? matchResult.matchCount : 0]
     );
     const newShuffleId = saved.rows[0].id;
+
+    // ============ RETROACTIVE TRACKING ============
+    // When this shuffle matches against an older one, that's a "received match"
+    // for the older shuffle. Track it and award retroactive achievements to
+    // the older shuffle's owner. Wrapped in try/catch — this must never break
+    // the shuffle. If anything goes wrong, we just skip it and log.
+    if (matchResult && matchResult.matchCount > 0) {
+      try {
+        const matchedId = matchResult.matchedShuffle.id;
+
+        // Get the matched shuffle's tracking data
+        const oldData = await pool.query(
+          'SELECT best_received_match, received_improvement_count, match_count, user_id, created_at FROM shuffles WHERE id = $1',
+          [matchedId]
+        );
+
+        if (oldData.rows.length > 0) {
+          const old = oldData.rows[0];
+          const prevBest = old.best_received_match || 0;
+          const improved = matchResult.matchCount > prevBest;
+
+          // Update best received match if this beats it
+          if (improved) {
+            await pool.query(
+              `UPDATE shuffles
+               SET best_received_match = $1,
+                   received_improvement_count = COALESCE(received_improvement_count, 0) + 1
+               WHERE id = $2`,
+              [matchResult.matchCount, matchedId]
+            );
+          }
+
+          // Award retroactive achievements to the OTHER user (not yourself)
+          if (old.user_id && old.user_id !== req.user.id) {
+            const ownerId = old.user_id;
+
+            // The Other Half — someone else matched against your shuffle
+            await pool.query(
+              `INSERT INTO user_achievements (user_id, achievement_id, shuffle_id)
+               VALUES ($1, 'the-other-half', $2)
+               ON CONFLICT DO NOTHING`,
+              [ownerId, matchedId]
+            );
+
+            if (improved) {
+              // Rising Star — your past shuffle's best received match improved
+              await pool.query(
+                `INSERT INTO user_achievements (user_id, achievement_id, shuffle_id)
+                 VALUES ($1, 'rising-star', $2)
+                 ON CONFLICT DO NOTHING`,
+                [ownerId, matchedId]
+              );
+
+              // Sleeper Hit — same thing, but the shuffle is 30+ days old
+              const ageMs = Date.now() - new Date(old.created_at).getTime();
+              if (ageMs >= 30 * 24 * 60 * 60 * 1000) {
+                await pool.query(
+                  `INSERT INTO user_achievements (user_id, achievement_id, shuffle_id)
+                   VALUES ($1, 'sleeper-hit', $2)
+                   ON CONFLICT DO NOTHING`,
+                  [ownerId, matchedId]
+                );
+              }
+
+              // Late Bloomer — original match was 2 or lower, now received 5+
+              if ((old.match_count || 0) <= 2 && matchResult.matchCount >= 5) {
+                await pool.query(
+                  `INSERT INTO user_achievements (user_id, achievement_id, shuffle_id)
+                   VALUES ($1, 'late-bloomer', $2)
+                   ON CONFLICT DO NOTHING`,
+                  [ownerId, matchedId]
+                );
+              }
+
+              // The Climber — best received match has improved 3+ separate times
+              const newCount = (old.received_improvement_count || 0) + 1;
+              if (newCount >= 3) {
+                await pool.query(
+                  `INSERT INTO user_achievements (user_id, achievement_id, shuffle_id)
+                   VALUES ($1, 'the-climber', $2)
+                   ON CONFLICT DO NOTHING`,
+                  [ownerId, matchedId]
+                );
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Retroactive tracking error:', err);
+        // Never break the shuffle — retroactive tracking is nice-to-have
+      }
+    }
 
     // If this match beats the global record, update it
     // Also track today's highest match
